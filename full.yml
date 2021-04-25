@@ -1,0 +1,104 @@
+- name: Start instances
+  hosts: localhost
+  gather_facts: no
+  vars:
+    image: ami-08962a4068733a2b6
+    instance_type: t2.nano
+    group_id: sg-02d97db7bc78d0e6d
+    keypair: test
+  tasks:
+    - name: Include vars file
+      include_vars: instances.yml
+
+    - name: Query for existing instances
+      community.aws.ec2_instance_info:
+        filters:
+          instance-state-name: ["running"]
+          "tag:Role": ["web", "app"]
+      register: running_instances
+
+    - name: Create instances name list from running instances
+      set_fact:
+        running_instances_names: "{{ running_instances.instances | map(attribute='tags') | map(attribute='Name') }}"
+
+    - name: debug
+      debug:
+        msg: "{{ running_instances_names }}"
+
+    - name: Start new instances
+      community.aws.ec2_instance:
+        image_id: "{{ image }}"
+        instance_type: "{{ instance_type }}"
+        vpc_subnet_id: "{{ item.1.subnet }}"
+        network:
+          assign_public_ip: "{{ item.1.assign_public_ip | default(false) }}"
+        security_group: "{{ group_id }}"
+        key_name: "{{ keypair }}"
+        wait: yes
+        name: "{{ item.0.name }}-{{ item.1.seq_num }}"
+        tags:
+          Role: "{{ item.0.name }}"
+      loop: "{{ instances|subelements('subnets') }}"
+      when: "'{{ item.0.name }}-{{ item.1.seq_num }}' not in running_instances_names"
+
+- name: Terminate unused instances
+  hosts: localhost
+  gather_facts: no
+  vars:
+    inventory_file_instances_names: []
+  tasks:
+    - name: Include vars file
+      include_vars: instances.yml
+
+    - name: Create instances name list from inventory file
+      set_fact:
+        inventory_file_instances_names: "{{ inventory_file_instances_names }} + ['{{ item.0.name }}-{{ item.1.seq_num }}']"
+      loop: "{{ instances|subelements('subnets') }}"
+
+    - name: Query for existing instances
+      community.aws.ec2_instance_info:
+        filters:
+          instance-state-name: ["running"]
+          "tag:Role": ["web", "app"]
+      register: existing_instances_id
+
+    - name: Terminate instances not used in inventory file
+      community.aws.ec2_instance:
+        instance_ids: ["{{ item.instance_id }}"]
+        state: absent
+        wait: no
+      loop: "{{ existing_instances_id.instances }}"
+      when: item.tags.Name not in inventory_file_instances_names
+
+- name: Create hosts list
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Query for existing instances
+      community.aws.ec2_instance_info:
+        filters:
+          instance-state-name: ["running"]
+          "tag:Role": ["web", "app"]
+      register: running_instances
+
+    - name: Create list of running instances IP
+      set_fact:
+        all_running_instances_ip: "{{ running_instances.instances | map(attribute='private_ip_address') }}"
+
+    - name: debug
+      debug:
+        var: all_running_instances_ip
+
+    - name: Add all running instances to host group
+      add_host:
+        host: "{{ item }}"
+        group: launched
+      loop: "{{ all_running_instances_ip }}"
+
+- name: Configure instance(s)
+  hosts: launched
+  become: yes
+  remote_user: ubuntu
+  gather_facts: no
+  roles:
+    - nginx

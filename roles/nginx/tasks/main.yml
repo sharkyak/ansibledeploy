@@ -1,0 +1,44 @@
+- name: Install nginx
+  apt:
+    name: nginx
+    state: present
+    update_cache: yes
+
+- name: Get instance_id
+  uri:
+    url: http://169.254.169.254/latest/meta-data/instance-id
+    return_content: yes
+  register: instance_id
+
+- name: Get instance info
+  community.aws.ec2_instance_info:
+    instance_ids:
+      - "{{ instance_id.content }}"
+  delegate_to: localhost
+  become: no
+  register: instance_info
+
+- name: Block for web instances only
+  block:
+    - name: Get apps in the availability zone
+      community.aws.ec2_instance_info:
+        filters:
+          instance-state-name: ["running"]
+          "tag:Role": ["app"]
+          availability-zone: "{{ instance_info.instances[0].placement.availability_zone }}"
+      delegate_to: localhost
+      become: no
+      register: query_availability_zone_apps
+
+    - name: Create list if private ip for availability_zone_apps
+      set_fact:
+        availability_zone_apps: "{{ query_availability_zone_apps.instances | map(attribute='private_ip_address') }}"
+
+    - name: Copy nginx configuration
+      template:
+        src: default.j2
+        dest: /etc/nginx/sites-available/default
+      notify:
+        - restart nginx
+
+  when: instance_info.instances[0].tags.Role == 'web'
